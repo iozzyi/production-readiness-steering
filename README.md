@@ -1,93 +1,72 @@
-# Production Readiness Steering File
+# AWS CDK + TypeScript Steering Files
 
-Opinionated production-readiness standards for AI-assisted development, designed for small teams (1-3 people) building serverless/container workloads on AWS.
+A set of AI steering files that encode production-grade standards for TypeScript-everywhere AWS projects deployed with CDK and GitHub Actions. These files guide AI coding assistants toward battle-tested patterns and away from common pitfalls.
 
-Drop this file into your project's `.kiro/steering/` folder and every AI agent interaction will follow these standards automatically — no manual prompting required.
+## What's Included
 
-## What It Does
+| File | Purpose |
+|------|---------|
+| `architecture-decisions.md` | Design principles for compute, routing, multi-tenancy, data, IAM, and cost optimization |
+| `github-cicd.md` | CI/CD pipeline structure, deploy scripts, container builds, OIDC, and failure recovery |
+| `production-readiness.md` | Application-level standards: hexagonal architecture, security, testing, resilience, observability |
+| `install-dependencies.md` | Dependency management rules to prevent stale lockfiles and broken builds |
 
-When included in a Kiro-powered workspace, this steering file ensures AI agents:
+## How They Work Together
 
-- Structure code in a 2-layer architecture (`app/` + `infra/`)
-- Never hardcode secrets — always use Secrets Manager
-- Validate all external inputs with schemas (Pydantic / Zod)
-- Enforce tool allowlists when AI models invoke actions
-- Use structured JSON logging with correlation IDs
-- Implement circuit breakers on all external dependencies
-- Write tests targeting 60% coverage on critical paths
-- Deploy infrastructure via CDK or SST — never manual clicks
-- Set up 5 essential CloudWatch alarms
-- Avoid over-engineering (no Kubernetes for small workloads, no microservices for single domains)
-
-## Installation
-
-Copy the steering file into your project:
-
-```bash
-mkdir -p .kiro/steering
-cp production-readiness.md .kiro/steering/
+```
+architecture-decisions.md    → WHY we make certain choices (principles)
+production-readiness.md      → WHAT the application code must satisfy (standards)
+github-cicd.md               → HOW we build, test, and deploy (pipeline mechanics)
+install-dependencies.md      → WHEN to install deps (operational discipline)
 ```
 
-Or add as a git submodule:
+- `architecture-decisions.md` sets the strategic direction — TypeScript everywhere, CDK for IaC, ARM64 Fargate, ALB with host-based routing, DynamoDB for state, SSM for discovery.
+- `production-readiness.md` defines what "done" looks like at the application layer — hexagonal architecture, 80% test coverage, circuit breakers, structured logging, per-tenant isolation.
+- `github-cicd.md` covers the delivery pipeline — image builds, CDK deploys, OIDC roles, self-healing scripts, multi-tenant lifecycle, and a comprehensive failure-pattern reference table.
+- `install-dependencies.md` prevents a class of "works on my machine" bugs by enforcing immediate installs after any `package.json` edit.
 
-```bash
-git submodule add <repo-url> .kiro/steering/production-readiness
-```
+## Usage
 
-## Configuration
+### With Kiro
 
-The file uses `inclusion: always` front matter, meaning it applies to every AI interaction in the workspace. To make it opt-in instead, change the front matter:
+Place these files in `.kiro/steering/` at your workspace root. Kiro loads them automatically on every interaction (they use `inclusion: always` front-matter).
 
-```yaml
----
-inclusion: manual
-description: Production-readiness standards for small teams on AWS.
----
-```
+### With Other AI Assistants
 
-With `manual` inclusion, users reference it explicitly via `#production-readiness` in chat.
+Feed these files as system context or reference documents. They're written as declarative rules that any LLM-based coding assistant can follow.
 
-## What's Covered
+## Key Patterns Encoded
 
-| Section | Summary |
-|---------|---------|
-| Architecture | 2 layers (`app/` + `infra/`), inward dependency flow, validated config at startup |
-| 5 Non-Negotiables | Secrets Manager, input validation, tool allowlists, structured logging, circuit breakers |
-| Security | KMS encryption, least-privilege IAM, WAF, auth on every request, no PII in logs |
-| Error Handling | Typed error codes, structured responses, fail-fast on config errors |
-| Testing | 60% coverage threshold, focus on business logic and validation |
-| Observability | 5 CloudWatch alarms, structured logs, X-Ray only when needed |
-| Resilience | Circuit breakers, retries with backoff, timeouts, graceful degradation |
-| IaC | CDK or SST, one stack per environment, auto-scaling, private subnets |
-| CI/CD | Lint → Test → Build → Deploy, coverage enforced, manual prod approval |
-| Progressive Complexity | "What to add later" table — only take on overhead when the pain justifies it |
-| Anti-Patterns | Explicit list of things to avoid (Kubernetes for small workloads, over-abstraction, etc.) |
+- **Build once, deploy everywhere** — Docker images built in a dedicated workflow, pushed to ECR, referenced by tag during CDK deploy
+- **Hexagonal architecture** — domain logic has zero external dependencies; adapters implement port interfaces
+- **Multi-tenant by default** — per-tenant Cognito pools, DynamoDB isolation, config-driven behavior (not code branches)
+- **SSM for resource discovery** — CDK writes IDs at creation time, scripts read from SSM (never hardcoded, never passed as arguments)
+- **Feature-flagged cost** — observability, WAF, canaries toggled via environment variables
+- **Self-healing deploys** — scripts detect and recover stuck CloudFormation stacks
+- **Narrow IAM roles** — separate roles per lifecycle step, OIDC federation for CI/CD
 
-## Philosophy
+## Target Stack
 
-These standards exist at the intersection of two failure modes:
+These steering files assume:
 
-1. **Too little rigour** — no validation, no logging, no resilience. Works until it doesn't, then you're debugging blind at 2am.
-2. **Too much ceremony** — 3-layer architecture, 80% coverage, SonarQube, OpenAPI specs, event sourcing. Appropriate for 50-person teams, paralysing for solo developers.
+- **Language:** TypeScript (backend, frontend, IaC)
+- **Infrastructure:** AWS CDK
+- **Compute:** ECS Fargate (ARM64)
+- **CI/CD:** GitHub Actions with OIDC
+- **Testing:** Vitest (unit), Cypress (E2E)
+- **Validation:** Zod (runtime), TypeScript (compile-time)
+- **Logging:** Pino (structured JSON)
+- **State:** DynamoDB (ephemeral), SSM Parameter Store (config)
 
-This file targets the middle ground: enough structure to sleep at night, not so much that you spend more time on infrastructure than product.
+## Adapting for Your Project
 
-## Compatibility
+These files are opinionated but modular. Common adaptations:
 
-- **Kiro** — drop into `.kiro/steering/`
-- **Other AI coding tools** — the file is plain Markdown. Copy the content into your tool's system prompt, rules file, or context window.
-- **Human developers** — readable as a standalone engineering standards document
-
-## Customisation
-
-Fork and modify freely. Common adjustments:
-
-- Change coverage threshold (60% → 80% for regulated industries)
-- Add language-specific tooling (Go, Rust, Java equivalents)
-- Replace AWS services with GCP/Azure equivalents
-- Add domain-specific non-negotiables (e.g., HIPAA, SOC 2)
-- Remove the "What to Add Later" section if your team is already large
+- **Single-tenant?** Remove the multi-tenancy sections from `production-readiness.md` and `github-cicd.md`.
+- **Different CI provider?** Replace GitHub Actions specifics in `github-cicd.md` with your provider's equivalents (the CDK and deploy script patterns still apply).
+- **Different compute?** Swap ECS/Fargate references for Lambda, App Runner, or EKS — the architecture principles and production standards remain valid.
+- **No frontend?** The frontend versioning and Lambda@Edge sections can be removed without affecting backend/infra guidance.
 
 ## License
 
-MIT — use it however you want.
+These steering files are project documentation. Use and adapt them freely.
