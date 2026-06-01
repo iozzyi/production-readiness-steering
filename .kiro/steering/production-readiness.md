@@ -1,11 +1,11 @@
 ---
 inclusion: always
-description: Production-readiness standards covering application code quality, security, testing, resilience, and observability. For CI/CD pipeline patterns, deploy scripts, and GitHub Actions configuration, see the github-iac skill.
+description: Production-readiness standards covering application code quality, security, testing, resilience, and observability. For CI/CD pipeline patterns, deploy scripts, and GitHub Actions configuration, see github-cicd.md steering.
 ---
 
 # Production Readiness Standards
 
-These standards cover **application-level** concerns: code architecture, security, testing, error handling, resilience, and observability. For CI/CD pipeline structure, deploy scripts, container builds, and GitHub Actions configuration, activate the `github-iac` skill.
+These standards cover **application-level** concerns: code architecture, security, testing, error handling, resilience, and observability. For CI/CD pipeline structure, deploy scripts, container builds, and GitHub Actions configuration, see the `github-cicd.md` steering file.
 
 ## PCI-DSS
 
