@@ -1,127 +1,151 @@
 ---
 inclusion: always
-description: Production-readiness standards for small teams on AWS. Enforces 5 non-negotiables (secrets management, input validation, tool allowlists, structured logging, circuit breakers), a 2-layer architecture, 60% test coverage, 5 CloudWatch alarms, CDK/SST for IaC, and simple CI/CD. Includes guidance on what to defer until complexity demands it.
+description: Production-readiness standards covering application code quality, security, testing, resilience, and observability. For CI/CD pipeline patterns, deploy scripts, and GitHub Actions configuration, see the github-iac skill.
 ---
 
-# Production Readiness Standards — Balanced for Small Teams
+# Production Readiness Standards
 
-These standards balance production-readiness with low operational overhead for small teams (1-3 people) building serverless/container workloads on AWS.
+These standards cover **application-level** concerns: code architecture, security, testing, error handling, resilience, and observability. For CI/CD pipeline structure, deploy scripts, container builds, and GitHub Actions configuration, activate the `github-iac` skill.
 
 ## PCI-DSS
 
 These standards do NOT override PCI-DSS requirements. If handling card data, apply PCI compliance standards separately.
 
-## Architecture (2 Layers, Not 3)
+## Architecture (Hexagonal / Ports & Adapters)
 
-- Use **two layers**: `app/` (domain logic + handlers) and `infra/` (external integrations)
-- `app/` contains: business logic, models, orchestration, error definitions
-- `infra/` contains: AWS SDK clients, WebSocket/HTTP servers, auth, metrics
-- Domain logic in `app/` must NOT import from `infra/` — dependency flows inward only
-- A `config.py` (or `config.ts`) at the root validates all environment variables at startup
-- A `main.py` (or `main.ts`) at the root wires everything together (composition root)
-- Do NOT create ports/adapters/interfaces unless the project has 3+ implementations of the same contract
+- `backend/src/domain/` — Pure business logic, ports (interfaces), models — ZERO external dependencies
+- `backend/src/adapters/driven/` — Outbound adapters (Bedrock, Cognito, DynamoDB, SSM, session pool, tenant resolver, rate limiter)
+- `backend/src/adapters/driving/` — Inbound adapter (WebSocket server with HTTP /health endpoint)
+- `backend/src/config.ts` — Validates all environment variables at startup with Zod
+- `backend/src/main.ts` — Composition root, wires ports to adapters
+- Domain logic MUST NOT import from adapters — dependency flows inward only
+- Every adapter implements a domain port interface
+- Tenant context threaded through all service calls (never global state)
 
 ## 5 Non-Negotiables (Never Skip)
 
-1. **Secrets in Secrets Manager** — never in environment variables, never in source code, never in git. Use AWS Secrets Manager or SSM Parameter Store. CDK/SST wires secrets to the runtime.
-2. **Input validation** — every external input (HTTP, WebSocket, event) validated with a schema before processing. Use Pydantic (Python) or Zod (TypeScript). Reject malformed input immediately.
-3. **Tool/action allowlist** — if an AI model can invoke tools, maintain an explicit allowlist. Rate-limit tool calls per session. Classify tools by risk level (LOW/MEDIUM/HIGH). HIGH-risk tools require human approval.
-4. **Structured logging** — JSON format, correlation IDs on every log line, PII redacted. Use structlog (Python) or pino (TypeScript). Never `print()` or `console.log()` in production code.
-5. **Circuit breaker on external dependencies** — any call to an external service (Bedrock, PSP, third-party API) must have a circuit breaker. A voice call with 30 seconds of silence is worse than a graceful fallback message.
+1. **Secrets in Secrets Manager** — never in environment variables, never in source code, never in git. Use AWS Secrets Manager or SSM Parameter Store. CDK wires secrets to the runtime.
+2. **Input validation** — every external input (WebSocket message, tenant YAML) validated with Zod before processing. Reject malformed input immediately.
+3. **Tool/action allowlist** — explicit tool registry with rate limiting and risk classification (LOW/MEDIUM/HIGH). HIGH-risk tools require human approval.
+4. **Structured logging** — JSON format via pino, correlation IDs + tenant ID on every log line, PII redacted. Never `console.log()` in production code.
+5. **Circuit breaker on external dependencies** — any call to Bedrock, DynamoDB, or third-party APIs must have a circuit breaker (3 failures in 60s → OPEN → 30s cooldown). For voice: never leave the user in silence.
 
 ## Security
 
 - All data encrypted at rest (KMS) and in transit (TLS 1.2+)
-- IAM roles with least-privilege — scope to specific resources, not `*`
-- WAF on any public-facing endpoint (rate limiting + geo-restriction at minimum)
+- Four narrow IAM roles for tenant lifecycle — never one broad admin role
+- WAF on public-facing endpoints (feature-flagged)
 - No hardcoded credentials, API keys, or tokens anywhere in the codebase
-- Validate authentication on every request (JWT, API key, or webhook signature)
-- Never log secrets, tokens, card numbers, or full PII — log references only
+- Validate authentication on every WebSocket connection (JWT via per-tenant Cognito pool)
+- Per-tenant data isolation: own DynamoDB table, own Cognito pool
+- Never log secrets, tokens, or full PII — log references only
+- VPC with private subnets for compute; public subnets only for load balancers
+
+## Multi-Tenant Application Design
+
+Design for multi-tenancy from the start in application code:
+
+### Tenant Resolution
+- Per-tenant Cognito pools (physical isolation, no shared pool)
+- JWT `iss` claim → pool ID → DynamoDB lookup → full tenant config
+- No caching — fresh read per connection (~5-10ms, negligible)
+- Tenant config drives: system prompt, model, limits, theme, features
+
+### Rate Limiting (Application Layer)
+- Per-tenant, not per-user (tenant's users share the tenant's quota)
+- Atomic DynamoDB counters for concurrent sessions and daily calls
+- Config-driven limits from tenant config (not hardcoded)
+- Fail closed on DynamoDB errors (reject connection)
+- WebSocket close codes: 4029 (concurrent), 4030 (daily), 4031 (duration)
+
+### Session Pool (Cross-Region Capacity)
+- DynamoDB TTL-based leases for external service session management
+- Distribute across available regions by priority (closest first)
+- Self-healing: crashed sessions expire via TTL (no manual cleanup)
+- Capacity validated at provisioning time (sum of tenant limits ≤ platform max)
 
 ## Error Handling
 
-- Define domain errors with typed error codes (enum/string union)
+- Define domain errors with typed error codes (`ErrorCode` string union in `errors.ts`)
 - Never expose stack traces or internal details to external consumers
-- Log errors with context (session ID, operation, input summary) — not just the exception message
+- Log errors with context (session ID, tenant ID, operation, input summary)
 - Return structured error responses: `{ code, message }` — never raw exception strings
 - Fail fast on configuration errors at startup — don't discover missing config mid-call
 
-## Testing (60% Coverage on Critical Paths)
+## Testing (80% Coverage — No Exclusions)
 
-- Test the orchestration/business logic layer thoroughly (this is where bugs live)
+- Test ALL source files — never exclude adapters or services from coverage to fake thresholds
+- Test the domain/orchestration layer thoroughly (this is where bugs live)
 - Test input validation (ensure malformed input is rejected)
-- Test tool allowlist enforcement (ensure blocked tools stay blocked)
-- Test circuit breaker state transitions
-- Integration tests for external adapters are optional for MVP — add when the adapter has failed in production
-- Use `pytest` (Python) or `vitest` (TypeScript) — match the project language
-- Coverage enforced in CI — build fails below 60%
+- Test tenant resolver (valid/unknown/inactive tenant, DynamoDB failure)
+- Test session pool (acquire/release/capacity exhaustion/TTL calculation)
+- Test rate limiter (under limit/at limit/counter edge cases)
+- Test adapters with mocked AWS SDK clients (`vi.mock("@aws-sdk/client-*")`)
+- Test WebSocket adapter with mocked `ws` module (`vi.mock("ws")` with EventEmitter-based mocks)
+- Use `vitest` with coverage threshold enforced in CI — build fails below 80%
+- CDK assertions tests for all stacks
+- Cypress E2E tests for all frontend flows
+- Tenant YAML validation tests (Zod schema + platform-wide constraints)
 
-## Observability (5 Alarms, Not 50)
+## Observability (Feature-Flagged)
 
-- **5 CloudWatch alarms minimum:**
-  1. Error rate > threshold (5xx responses or unhandled exceptions)
-  2. Latency p99 > acceptable threshold
-  3. Circuit breaker in OPEN state
-  4. Active sessions/connections approaching capacity
-  5. Failed authentication attempts spike
-- Structured logs flow to CloudWatch Log Groups with 14-day retention (dev) or 90-day (prod)
-- Add X-Ray tracing only when you have a latency problem to diagnose — not by default
-- Add custom metrics only for business-critical measurements (e.g., payment success rate)
+All observability resources are feature-flagged via environment variables.
+
+### Always deployed (all environments):
+- **5 CloudWatch alarms:** Error rate, latency p99, circuit breaker OPEN, connection capacity, auth failures
+- **Structured logs** → CloudWatch Log Groups (14-day dev, 30-day staging, 90-day prod)
+- **VPC Flow Logs** → CloudWatch Logs
+- **Per-tenant alarms** for dedicated tier (CPU, task count, unhealthy targets)
+
+### Feature-flagged (staging + prod only):
+| Feature | Toggle | Cost |
+|---------|--------|------|
+| CloudWatch Dashboard | `ENABLE_DASHBOARD=true` | ~$3/mo |
+| Synthetics Canary | `ENABLE_CANARY=true` | ~$5/mo |
+| Load Test | `ENABLE_LOAD_TEST=true` | Free |
+
+### Never deployed to dev:
+Observability resources never deployed to dev regardless of toggle values. Enforced in env-config defaults.
 
 ## Resilience
 
 - Circuit breaker on every external dependency (3 failures in 60s → OPEN → 30s cooldown)
 - Retry transient errors once with 500ms delay, then circuit breaker
-- Timeout on all external calls (Bedrock: 10s, PSP: 30s, DynamoDB: 5s)
+- Timeout on all external calls (Bedrock: 10s, DynamoDB: 5s)
 - Graceful degradation: if the primary path fails, provide a degraded but functional experience
 - For voice: never leave the user in silence — always speak a fallback message on failure
-- Connection renewal for long-lived streams (Nova Sonic 8-min limit: renew at 7m30s)
-
-## Infrastructure as Code
-
-- Use **CDK** (TypeScript) or **SST** for all infrastructure — never manual console clicks
-- One stack per environment (dev + prod minimum)
-- Auto-deploy to dev on push to main; manual approval for prod
-- Private subnets for compute; public subnets only for load balancers
-- Auto-scaling configured (scale on CPU or concurrent connections)
-- Secrets referenced from Secrets Manager in task definitions — not passed as plain env vars
-
-## CI/CD (Simple Pipeline)
-
-- **Lint** → **Test** → **Build** → **Deploy**
-- Use GitHub Actions or GitLab CI (whichever the repo uses)
-- Lint: ruff (Python) or eslint+prettier (TypeScript) — enforced, not advisory
-- Test: pytest/vitest with coverage threshold
-- Build: Docker image or CDK synth
-- Deploy: `cdk deploy` or `sst deploy` with environment parameter
-- No SonarQube, no Spectral, no oasdiff — add these when the team grows beyond 3 people
+- Connection renewal for long-lived streams (renew before platform timeout)
+- ECS circuit breaker with auto-rollback on deployment failure
+- Session pool TTL self-heals on crashes (no manual reconciliation)
+- Config-driven drain period for tier changes (max_call_duration + 1 min buffer)
 
 ## Configuration
 
-- All config validated at startup with typed schemas (Pydantic Settings or Zod)
+- All config validated at startup with Zod
 - Fail fast if required config is missing — don't start the service
-- Separate config per environment via environment variables (not config files per env)
-- System prompts and AI configuration stored in Secrets Manager (not source code) — allows tuning without redeployment
+- Tenant config in DynamoDB (not environment variables)
+- Resource IDs discovered via SSM (never passed as arguments)
+- System prompt per tenant in DynamoDB (tunable without redeployment)
+- Feature flags for expensive resources via environment variables
+- Region default in shared deploy config — single source of truth
 
-## What to Add Later (When It Hurts)
+## Three Environments
 
-| Trigger | Then Add |
-|---------|----------|
-| Second developer joins | PR reviews, CODEOWNERS, stricter CI gates |
-| Latency complaints from users | X-Ray tracing, provisioned throughput |
-| >1000 requests/day sustained | DynamoDB persistence, multi-AZ, scaling tuning |
-| PCI audit required | Tier 1/Tier 2 account separation, full audit logging, PCI compliance controls |
-| Third service in the ecosystem | Shared libraries, event bus, API contracts |
-| Compliance/governance review | OpenAPI docs, ADRs, formal test strategy, SonarQube |
-| Team grows to 5+ | Full Clean Architecture (3 layers), ArchUnit tests, shared CI templates |
+| Environment | Purpose | Observability |
+|-------------|---------|---------------|
+| **dev** | Developer iteration | Alarms + logs only |
+| **staging** | Pre-prod validation | Full (when toggled on) |
+| **prod** | Live traffic | Full (when toggled on) |
 
-## Anti-Patterns (Never Do)
+## Anti-Patterns (Application Level)
 
-- ❌ Kubernetes for a single service with <10 concurrent users
-- ❌ Microservices when you have one team and one domain
-- ❌ Terraform when you're AWS-only and CDK/SST gives better DX
-- ❌ Multi-region for a service that doesn't need it yet
-- ❌ Custom observability dashboards before you have users
-- ❌ Event sourcing / CQRS for a simple CRUD or request-response service
-- ❌ Spending more time on infrastructure than on the product
-- ❌ Copying an enterprise platform's full architecture for a greenfield with 1/100th the traffic
+- ❌ Shared Cognito pool for multi-tenant — use per-tenant pools
+- ❌ Cache tenant config in memory — fresh read per connection
+- ❌ Hardcode rate limits — read from tenant config
+- ❌ One broad IAM admin role — use narrow roles per lifecycle step
+- ❌ Exclude files from coverage to fake passing thresholds
+- ❌ `console.log()` in production code — use structured logger
+- ❌ Expose stack traces to clients — return error codes only
+- ❌ Global mutable state for tenant context — thread through calls
+- ❌ Manual reconciliation for leaked sessions — use TTL self-healing
+- ❌ Hardcode timeouts for drain periods — read from config
